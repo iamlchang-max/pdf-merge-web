@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDF 合併工具</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>PDF 合併工具</h1>
+      <p class="subtitle">上傳多個 PDF，調整順序後一鍵下載合併檔案。</p>
+
+      <section class="card">
+        <label for="pdfInput" class="button">選擇 PDF 檔案</label>
+        <input id="pdfInput" type="file" accept="application/pdf" multiple />
+        <div id="dropZone" class="drop-zone" role="button" tabindex="0">
+          把 PDF 拖曳到這裡，或點上方按鈕選擇
+        </div>
+        <p id="hint">可一次選擇多個檔案，或再次選擇以追加。</p>
+      </section>
+
+      <section class="card">
+        <h2>檔案清單（含頁數預覽）</h2>
+        <ul id="fileList" aria-live="polite"></ul>
+      </section>
+
+      <section class="actions">
+        <button id="mergeBtn" disabled>合併並下載</button>
+        <button id="clearBtn" class="secondary" disabled>清空清單</button>
+      </section>
+
+      <p id="status" aria-live="polite"></p>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/pdf-lib/dist/pdf-lib.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
