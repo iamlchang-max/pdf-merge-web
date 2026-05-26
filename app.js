@@ -1,3 +1,5 @@
+// ==================== 合併功能（原本，未修改）====================
+
 const input = document.querySelector('#pdfInput');
 const dropZone = document.querySelector('#dropZone');
 const fileList = document.querySelector('#fileList');
@@ -236,4 +238,132 @@ function toErrorMessage(error) {
 function setStatus(message, isError = false) {
   statusText.textContent = message;
   statusText.style.color = isError ? '#dc2626' : '#0369a1';
+}
+
+// ==================== 分割功能（新增）====================
+
+const splitInput     = document.getElementById('splitInput');
+const splitFileInfo  = document.getElementById('splitFileInfo');
+const splitRangeCard = document.getElementById('splitRangeCard');
+const splitRangeInput = document.getElementById('splitRangeInput');
+const splitBtn       = document.getElementById('splitBtn');
+const splitStatus    = document.getElementById('splitStatus');
+
+let splitFileBuffer = null;  // 待分割 PDF 的 ArrayBuffer
+let splitTotalPages = 0;
+
+// 1. 選擇檔案：讀取並顯示總頁數
+splitInput.addEventListener('change', async () => {
+  const file = splitInput.files[0];
+  if (!file) return;
+
+  splitStatus.textContent = '';
+  splitFileInfo.textContent = '讀取中…';
+  splitRangeCard.style.display = 'none';
+  splitFileBuffer = null;
+
+  try {
+    splitFileBuffer = await file.arrayBuffer();
+    const pdfDoc = await PDFLib.PDFDocument.load(splitFileBuffer);
+    splitTotalPages = pdfDoc.getPageCount();
+    splitFileInfo.textContent = `✅ ${file.name}（共 ${splitTotalPages} 頁）`;
+    splitRangeCard.style.display = '';
+  } catch (e) {
+    splitFileInfo.textContent = '❌ 無法讀取此 PDF，請確認檔案是否損毀。';
+  }
+});
+
+// 2. 解析範圍字串，例如 "1-3, 5, 7-10"
+//    回傳 { result: [{ label, pages: [0-based index, ...] }, ...], errors: [...] }
+function parseRanges(rangeStr, totalPages) {
+  const segments = rangeStr.split(',').map((s) => s.trim()).filter(Boolean);
+  const result = [];
+  const errors = [];
+
+  for (const seg of segments) {
+    const matchRange  = seg.match(/^(\d+)-(\d+)$/);
+    const matchSingle = seg.match(/^(\d+)$/);
+
+    if (matchRange) {
+      const from = parseInt(matchRange[1], 10);
+      const to   = parseInt(matchRange[2], 10);
+      if (from < 1 || to > totalPages || from > to) {
+        errors.push(`「${seg}」超出範圍（共 ${totalPages} 頁）`);
+        continue;
+      }
+      const pages = [];
+      for (let i = from; i <= to; i++) pages.push(i - 1); // 轉 0-based
+      result.push({ label: seg, pages });
+    } else if (matchSingle) {
+      const page = parseInt(matchSingle[1], 10);
+      if (page < 1 || page > totalPages) {
+        errors.push(`「${seg}」超出範圍（共 ${totalPages} 頁）`);
+        continue;
+      }
+      result.push({ label: seg, pages: [page - 1] });
+    } else {
+      errors.push(`「${seg}」格式無法辨識`);
+    }
+  }
+
+  return { result, errors };
+}
+
+// 3. 執行分割並打包 ZIP 下載
+splitBtn.addEventListener('click', async () => {
+  if (!splitFileBuffer) return;
+
+  const rangeStr = splitRangeInput.value.trim();
+  if (!rangeStr) {
+    setSplitStatus('⚠️ 請輸入分割範圍。', true);
+    return;
+  }
+
+  const { result: ranges, errors } = parseRanges(rangeStr, splitTotalPages);
+
+  if (errors.length > 0) {
+    setSplitStatus('❌ ' + errors.join('；'), true);
+    return;
+  }
+  if (ranges.length === 0) {
+    setSplitStatus('⚠️ 沒有有效範圍，請重新輸入。', true);
+    return;
+  }
+
+  splitBtn.disabled = true;
+  setSplitStatus(`處理中，共 ${ranges.length} 個片段…`);
+
+  try {
+    const srcDoc = await PDFLib.PDFDocument.load(splitFileBuffer);
+    const zip = new JSZip();
+
+    for (let i = 0; i < ranges.length; i++) {
+      const { label, pages } = ranges[i];
+      const newDoc = await PDFLib.PDFDocument.create();
+      const copied = await newDoc.copyPages(srcDoc, pages);
+      copied.forEach((page) => newDoc.addPage(page));
+      const pdfBytes = await newDoc.save();
+      const filename = `split_${String(i + 1).padStart(2, '0')}_p${label}.pdf`;
+      zip.file(filename, pdfBytes);
+    }
+
+    const zipBlob = await zip.generateAsync({ type: 'blob' });
+    const url = URL.createObjectURL(zipBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `split-${new Date().toISOString().slice(0, 10)}.zip`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    setSplitStatus(`✅ 已下載 ${ranges.length} 個 PDF（ZIP）。`);
+  } catch (e) {
+    setSplitStatus(`❌ 分割失敗：${e.message}`, true);
+  } finally {
+    splitBtn.disabled = false;
+  }
+});
+
+function setSplitStatus(message, isError = false) {
+  splitStatus.textContent = message;
+  splitStatus.style.color = isError ? '#dc2626' : '#0369a1';
 }
