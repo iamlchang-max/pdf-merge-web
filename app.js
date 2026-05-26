@@ -303,8 +303,8 @@ async function loadSplitFile(file) {
     splitFileInfo.textContent = `✅ ${file.name}（共 ${splitTotalPages} 頁）`;
     splitPreviewCard.style.display = '';
 
-    // 用 PDF.js 渲染縮圖
-    await renderThumbnails(splitFileBuffer, splitTotalPages);
+    // PDF.js 渲染縮圖時會 detach 原本的 ArrayBuffer，所以傳入複製品
+    await renderThumbnails(splitFileBuffer.slice(0), splitTotalPages);
     updateSelectedCount();
   } catch (e) {
     splitFileInfo.textContent = '❌ 無法讀取此 PDF，請確認檔案是否損毀。';
