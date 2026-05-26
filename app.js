@@ -213,7 +213,6 @@ function createActionButton(text, onClick, extraClass = '') {
 function moveFile(index, direction) {
   const targetIndex = index + direction;
   if (targetIndex < 0 || targetIndex >= files.length) return;
-
   [files[index], files[targetIndex]] = [files[targetIndex], files[index]];
   renderList();
 }
@@ -229,9 +228,7 @@ function formatSize(bytes) {
 }
 
 function toErrorMessage(error) {
-  if (error instanceof Error) {
-    return error.message || '未知錯誤';
-  }
+  if (error instanceof Error) return error.message || '未知錯誤';
   return '未知錯誤';
 }
 
@@ -240,126 +237,193 @@ function setStatus(message, isError = false) {
   statusText.style.color = isError ? '#dc2626' : '#0369a1';
 }
 
-// ==================== 分割功能（新增）====================
+// ==================== 分割功能（含拖曳 + 縮圖預覽）====================
 
-const splitInput     = document.getElementById('splitInput');
-const splitFileInfo  = document.getElementById('splitFileInfo');
-const splitRangeCard = document.getElementById('splitRangeCard');
-const splitRangeInput = document.getElementById('splitRangeInput');
-const splitBtn       = document.getElementById('splitBtn');
-const splitStatus    = document.getElementById('splitStatus');
+const splitInput      = document.getElementById('splitInput');
+const splitDropZone   = document.getElementById('splitDropZone');
+const splitFileInfo   = document.getElementById('splitFileInfo');
+const splitPreviewCard = document.getElementById('splitPreviewCard');
+const splitThumbnails = document.getElementById('splitThumbnails');
+const splitBtn        = document.getElementById('splitBtn');
+const splitStatus     = document.getElementById('splitStatus');
+const selectedCount   = document.getElementById('selectedCount');
+const selectAllBtn    = document.getElementById('selectAllBtn');
+const deselectAllBtn  = document.getElementById('deselectAllBtn');
 
-let splitFileBuffer = null;  // 待分割 PDF 的 ArrayBuffer
+let splitFileBuffer = null;
 let splitTotalPages = 0;
+// selectedPages: Set of 0-based page indices
+const selectedPages = new Set();
 
-// 1. 選擇檔案：讀取並顯示總頁數
+// ── 拖曳區域 ──
+splitDropZone.addEventListener('click', () => splitInput.click());
+splitDropZone.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); splitInput.click(); }
+});
+
+['dragenter', 'dragover'].forEach((ev) => {
+  splitDropZone.addEventListener(ev, (e) => {
+    e.preventDefault();
+    splitDropZone.classList.add('drag-over');
+  });
+});
+['dragleave', 'drop'].forEach((ev) => {
+  splitDropZone.addEventListener(ev, (e) => {
+    e.preventDefault();
+    splitDropZone.classList.remove('drag-over');
+  });
+});
+splitDropZone.addEventListener('drop', async (e) => {
+  const droppedFiles = Array.from(e.dataTransfer?.files || []);
+  const pdf = droppedFiles.find((f) => f.type === 'application/pdf');
+  if (!pdf) { setSplitStatus('請拖曳 PDF 檔案。', true); return; }
+  await loadSplitFile(pdf);
+});
+
 splitInput.addEventListener('change', async () => {
   const file = splitInput.files[0];
-  if (!file) return;
+  if (file) await loadSplitFile(file);
+  splitInput.value = '';
+});
 
-  splitStatus.textContent = '';
+// ── 載入檔案並渲染縮圖 ──
+async function loadSplitFile(file) {
   splitFileInfo.textContent = '讀取中…';
-  splitRangeCard.style.display = 'none';
+  splitPreviewCard.style.display = 'none';
+  splitThumbnails.innerHTML = '';
+  selectedPages.clear();
   splitFileBuffer = null;
 
   try {
     splitFileBuffer = await file.arrayBuffer();
+
+    // 用 pdf-lib 取得總頁數
     const pdfDoc = await PDFLib.PDFDocument.load(splitFileBuffer);
     splitTotalPages = pdfDoc.getPageCount();
     splitFileInfo.textContent = `✅ ${file.name}（共 ${splitTotalPages} 頁）`;
-    splitRangeCard.style.display = '';
+    splitPreviewCard.style.display = '';
+
+    // 用 PDF.js 渲染縮圖
+    await renderThumbnails(splitFileBuffer, splitTotalPages);
+    updateSelectedCount();
   } catch (e) {
     splitFileInfo.textContent = '❌ 無法讀取此 PDF，請確認檔案是否損毀。';
+    console.error(e);
   }
-});
-
-// 2. 解析範圍字串，例如 "1-3, 5, 7-10"
-//    回傳 { result: [{ label, pages: [0-based index, ...] }, ...], errors: [...] }
-function parseRanges(rangeStr, totalPages) {
-  const segments = rangeStr.split(',').map((s) => s.trim()).filter(Boolean);
-  const result = [];
-  const errors = [];
-
-  for (const seg of segments) {
-    const matchRange  = seg.match(/^(\d+)-(\d+)$/);
-    const matchSingle = seg.match(/^(\d+)$/);
-
-    if (matchRange) {
-      const from = parseInt(matchRange[1], 10);
-      const to   = parseInt(matchRange[2], 10);
-      if (from < 1 || to > totalPages || from > to) {
-        errors.push(`「${seg}」超出範圍（共 ${totalPages} 頁）`);
-        continue;
-      }
-      const pages = [];
-      for (let i = from; i <= to; i++) pages.push(i - 1); // 轉 0-based
-      result.push({ label: seg, pages });
-    } else if (matchSingle) {
-      const page = parseInt(matchSingle[1], 10);
-      if (page < 1 || page > totalPages) {
-        errors.push(`「${seg}」超出範圍（共 ${totalPages} 頁）`);
-        continue;
-      }
-      result.push({ label: seg, pages: [page - 1] });
-    } else {
-      errors.push(`「${seg}」格式無法辨識`);
-    }
-  }
-
-  return { result, errors };
 }
 
-// 3. 執行分割並打包 ZIP 下載
+// ── 渲染所有頁面縮圖 ──
+async function renderThumbnails(buffer, totalPages) {
+  splitThumbnails.innerHTML = '<p class="thumb-loading">縮圖產生中，請稍候…</p>';
+
+  const uint8 = new Uint8Array(buffer);
+  const pdfJs = await pdfjsLib.getDocument({ data: uint8 }).promise;
+
+  splitThumbnails.innerHTML = '';
+
+  for (let i = 1; i <= totalPages; i++) {
+    const pageIndex = i - 1; // 0-based
+
+    // 外框
+    const wrapper = document.createElement('div');
+    wrapper.className = 'thumb-wrapper';
+    wrapper.dataset.page = pageIndex;
+
+    // Canvas
+    const canvas = document.createElement('canvas');
+    canvas.className = 'thumb-canvas';
+
+    // 頁碼標籤
+    const label = document.createElement('span');
+    label.className = 'thumb-label';
+    label.textContent = `第 ${i} 頁`;
+
+    // 勾選 overlay
+    const check = document.createElement('div');
+    check.className = 'thumb-check';
+    check.textContent = '✓';
+
+    wrapper.append(canvas, label, check);
+    splitThumbnails.append(wrapper);
+
+    // 點擊切換選取
+    wrapper.addEventListener('click', () => {
+      if (selectedPages.has(pageIndex)) {
+        selectedPages.delete(pageIndex);
+        wrapper.classList.remove('selected');
+      } else {
+        selectedPages.add(pageIndex);
+        wrapper.classList.add('selected');
+      }
+      updateSelectedCount();
+    });
+
+    // 非同步渲染這一頁
+    renderOnePage(pdfJs, i, canvas);
+  }
+}
+
+async function renderOnePage(pdfJs, pageNum, canvas) {
+  try {
+    const page = await pdfJs.getPage(pageNum);
+    const viewport = page.getViewport({ scale: 0.3 });
+    canvas.width  = viewport.width;
+    canvas.height = viewport.height;
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+  } catch (e) {
+    console.error(`第 ${pageNum} 頁縮圖渲染失敗`, e);
+  }
+}
+
+// ── 全選 / 全部取消 ──
+selectAllBtn.addEventListener('click', () => {
+  for (let i = 0; i < splitTotalPages; i++) selectedPages.add(i);
+  document.querySelectorAll('.thumb-wrapper').forEach((w) => w.classList.add('selected'));
+  updateSelectedCount();
+});
+
+deselectAllBtn.addEventListener('click', () => {
+  selectedPages.clear();
+  document.querySelectorAll('.thumb-wrapper').forEach((w) => w.classList.remove('selected'));
+  updateSelectedCount();
+});
+
+function updateSelectedCount() {
+  const n = selectedPages.size;
+  selectedCount.textContent = `已選 ${n} 頁`;
+  splitBtn.disabled = n === 0;
+}
+
+// ── 下載選取頁面 ──
 splitBtn.addEventListener('click', async () => {
-  if (!splitFileBuffer) return;
-
-  const rangeStr = splitRangeInput.value.trim();
-  if (!rangeStr) {
-    setSplitStatus('⚠️ 請輸入分割範圍。', true);
-    return;
-  }
-
-  const { result: ranges, errors } = parseRanges(rangeStr, splitTotalPages);
-
-  if (errors.length > 0) {
-    setSplitStatus('❌ ' + errors.join('；'), true);
-    return;
-  }
-  if (ranges.length === 0) {
-    setSplitStatus('⚠️ 沒有有效範圍，請重新輸入。', true);
-    return;
-  }
+  if (!splitFileBuffer || selectedPages.size === 0) return;
 
   splitBtn.disabled = true;
-  setSplitStatus(`處理中，共 ${ranges.length} 個片段…`);
+  setSplitStatus(`處理中，共 ${selectedPages.size} 頁…`);
 
   try {
     const srcDoc = await PDFLib.PDFDocument.load(splitFileBuffer);
-    const zip = new JSZip();
+    const newDoc = await PDFLib.PDFDocument.create();
 
-    for (let i = 0; i < ranges.length; i++) {
-      const { label, pages } = ranges[i];
-      const newDoc = await PDFLib.PDFDocument.create();
-      const copied = await newDoc.copyPages(srcDoc, pages);
-      copied.forEach((page) => newDoc.addPage(page));
-      const pdfBytes = await newDoc.save();
-      const filename = `split_${String(i + 1).padStart(2, '0')}_p${label}.pdf`;
-      zip.file(filename, pdfBytes);
-    }
+    // 依頁碼順序排列
+    const sortedPages = [...selectedPages].sort((a, b) => a - b);
+    const copied = await newDoc.copyPages(srcDoc, sortedPages);
+    copied.forEach((page) => newDoc.addPage(page));
 
-    const zipBlob = await zip.generateAsync({ type: 'blob' });
-    const url = URL.createObjectURL(zipBlob);
+    const pdfBytes = await newDoc.save();
+    const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `split-${new Date().toISOString().slice(0, 10)}.zip`;
+    a.download = `split-${new Date().toISOString().slice(0, 10)}.pdf`;
     a.click();
     URL.revokeObjectURL(url);
 
-    setSplitStatus(`✅ 已下載 ${ranges.length} 個 PDF（ZIP）。`);
+    setSplitStatus(`✅ 已下載，共 ${selectedPages.size} 頁。`);
   } catch (e) {
-    setSplitStatus(`❌ 分割失敗：${e.message}`, true);
+    setSplitStatus(`❌ 下載失敗：${e.message}`, true);
   } finally {
-    splitBtn.disabled = false;
+    splitBtn.disabled = selectedPages.size === 0;
   }
 });
 
